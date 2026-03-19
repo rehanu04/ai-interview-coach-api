@@ -1,10 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import os
 import re
 import uuid
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -12,7 +11,7 @@ import json5
 import numpy as np
 import psycopg2
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Form
 from pydantic import BaseModel, Field
 
 load_dotenv()
@@ -25,14 +24,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 DATABASE_URL   = os.getenv("DATABASE_URL")
 
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
-WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
-WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
-
-app = FastAPI(title="AI Interview Coach (Cloud)", version="0.8.0")
-
-_WHISPER = None
-
+app = FastAPI(title="AI Interview Coach (Cloud)", version="1.0.0")
 
 # ---------------------------
 # Helpers
@@ -56,14 +48,12 @@ def sanitize_text(s: str) -> str:
     s = s.replace("â", "'")
     return s
 
-
 def strip_code_fences(text: str) -> str:
     t = text.strip()
     if t.startswith("```"):
         t = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", t)
         t = re.sub(r"\s*```$", "", t)
     return t.strip()
-
 
 def parse_json_tolerant(text: str) -> Dict[str, Any]:
     cleaned = sanitize_text(strip_code_fences(text))
@@ -76,13 +66,11 @@ def parse_json_tolerant(text: str) -> Dict[str, Any]:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Expected JSON but got invalid output. Error: {e}. Raw: {cleaned[:400]}")
 
-
 def filler_stats(text: str) -> Tuple[int, Dict[str, int]]:
     lower = text.lower()
     fillers = ["um", "uh", "like", "you know", "actually", "basically", "so"]
     counts = {f: lower.count(f) for f in fillers}
     return sum(counts.values()), counts
-
 
 def base_interview_system(role_title: str | None, job_description: str | None) -> str:
     role_part = f"Role: {role_title}\n" if role_title else ""
@@ -98,7 +86,6 @@ def base_interview_system(role_title: str | None, job_description: str | None) -
         f"{role_part}{jd_part}"
     )
 
-
 # ---------------------------
 # DB (PostgreSQL via psycopg2)
 # ---------------------------
@@ -110,10 +97,9 @@ def db_connect():
     conn.autocommit = True
     return conn
 
-
 def db_init() -> None:
     if not DATABASE_URL:
-        return  # Skip init if no DB URL (e.g., during build phase)
+        return  
     
     conn = db_connect()
     try:
@@ -187,11 +173,9 @@ def db_init() -> None:
     finally:
         conn.close()
 
-
 @app.on_event("startup")
 def _startup() -> None:
     db_init()
-
 
 # ---------------------------
 # LLM + Embeddings
@@ -240,10 +224,7 @@ async def call_llm(messages: List[Dict[str, str]], temperature: float = 0.3, max
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"LM Studio not reachable: {e}")
 
-
 async def embed_texts(texts: List[str]) -> List[np.ndarray]:
-    # Using LM Studio for embeddings in this example. If moving fully to cloud, 
-    # you may want to integrate Gemini's embedding models here instead.
     payload = {"model": EMBED_MODEL, "input": texts}
     try:
         async with httpx.AsyncClient(timeout=90.0) as client:
@@ -265,7 +246,6 @@ async def embed_texts(texts: List[str]) -> List[np.ndarray]:
         raise HTTPException(status_code=500, detail="Embedding count mismatch")
     return vecs
 
-
 # ---------------------------
 # RAG
 # ---------------------------
@@ -286,13 +266,11 @@ def chunk_text(text: str, max_chars: int = 600, overlap: int = 80) -> List[str]:
         start = max(0, end - overlap)
     return chunks
 
-
 def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
     denom = (np.linalg.norm(a) * np.linalg.norm(b))
     if denom == 0:
         return 0.0
     return float(np.dot(a, b) / denom)
-
 
 def ensure_profile_has_chunks(profile_id: str) -> None:
     conn = db_connect()
@@ -304,7 +282,6 @@ def ensure_profile_has_chunks(profile_id: str) -> None:
                 raise HTTPException(status_code=400, detail="Profile has no indexed chunks. Run /rag/index first.")
     finally:
         conn.close()
-
 
 async def rag_retrieve_context(profile_id: str, query: str, top_k: int = 4) -> str:
     q_vec = (await embed_texts([query]))[0]
@@ -328,7 +305,6 @@ async def rag_retrieve_context(profile_id: str, query: str, top_k: int = 4) -> s
             return f"Allowed candidate facts (ground truth):\n{bullets}\n"
     finally:
         conn.close()
-
 
 # ---------------------------
 # Coaching
@@ -363,7 +339,6 @@ async def score_answer_llm(interview_context: str, question: str, answer: str, r
     data = await call_llm([{"role": "system", "content": sys}, {"role": "user", "content": user}], temperature=0.0, max_tokens=450)
     return parse_json_tolerant(data["choices"][0]["message"]["content"])
 
-
 async def rewrite_answer_llm(interview_context: str, question: str, answer: str, rag_context: str) -> Dict[str, Any]:
     sys = (
         "You are an interview coach.\n"
@@ -395,7 +370,6 @@ async def rewrite_answer_llm(interview_context: str, question: str, answer: str,
     data = await call_llm([{"role": "system", "content": sys}, {"role": "user", "content": user}], temperature=0.1, max_tokens=650)
     return parse_json_tolerant(data["choices"][0]["message"]["content"])
 
-
 async def speech_coach_llm(question: str, transcript: str, rag_context: str) -> Dict[str, Any]:
     sys = (
         "You are an English communication coach for interview speaking.\n"
@@ -426,48 +400,6 @@ async def speech_coach_llm(question: str, transcript: str, rag_context: str) -> 
 
 
 # ---------------------------
-# Whisper
-# ---------------------------
-
-def _get_whisper():
-    global _WHISPER
-    if _WHISPER is None:
-        from faster_whisper import WhisperModel
-        _WHISPER = WhisperModel(WHISPER_MODEL, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE_TYPE)
-    return _WHISPER
-
-
-async def transcribe_upload(file: UploadFile) -> Tuple[str, List[Dict[str, Any]]]:
-    tmp_dir = Path("data") / "tmp"
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-
-    ext = ""
-    if file.filename and "." in file.filename:
-        ext = "." + file.filename.split(".")[-1].lower()
-    if ext not in [".wav", ".m4a", ".mp3", ".ogg", ".webm", ".flac", ".aac"]:
-        ext = ".bin"
-
-    tmp_path = tmp_dir / f"{uuid.uuid4().hex}{ext}"
-    tmp_path.write_bytes(await file.read())
-
-    try:
-        model = _get_whisper()
-        segments, _info = model.transcribe(str(tmp_path), vad_filter=True)
-        segs: List[Dict[str, Any]] = []
-        text_parts: List[str] = []
-        for s in segments:
-            segs.append({"start": float(s.start), "end": float(s.end), "text": s.text})
-            text_parts.append(s.text)
-        transcript = " ".join([t.strip() for t in text_parts]).strip()
-        return transcript, segs
-    finally:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-
-
-# ---------------------------
 # Request models
 # ---------------------------
 
@@ -475,29 +407,24 @@ class ProfileIngestRequest(BaseModel):
     raw_text: str = Field(..., min_length=50)
     name_hint: Optional[str] = None
 
-
 class ProfileSaveRequest(BaseModel):
     profile: Dict[str, Any]
     raw_text: Optional[str] = None
-
 
 class RagIndexRequest(BaseModel):
     profile_id: str
     max_chunk_chars: int = Field(default=600, ge=200, le=2000)
     overlap: int = Field(default=80, ge=0, le=400)
 
-
 class RagSearchRequest(BaseModel):
     profile_id: str
     query: str = Field(..., min_length=2)
     top_k: int = Field(default=5, ge=1, le=20)
 
-
 class SessionStartRequest(BaseModel):
     role_title: str | None = None
     job_description: str | None = None
     profile_id: str | None = None
-
 
 class SessionTurnRequest(BaseModel):
     session_id: str = Field(..., min_length=6)
@@ -505,17 +432,14 @@ class SessionTurnRequest(BaseModel):
     do_score: bool = True
     do_rewrite: bool = True
 
-
 class SpeechFeedbackRequest(BaseModel):
     text: str = Field(..., min_length=5)
     mode: str = Field(default="general")  
-
 
 class InterviewVoiceStartRequest(BaseModel):
     role_title: str | None = None
     job_description: str | None = None
     profile_id: str | None = None
-
 
 # ---------------------------
 # Endpoints
@@ -524,7 +448,6 @@ class InterviewVoiceStartRequest(BaseModel):
 @app.get("/health")
 def health() -> Dict[str, str]:
     return {"status": "ok"}
-
 
 @app.post("/profile/ingest")
 async def profile_ingest(req: ProfileIngestRequest) -> Dict[str, Any]:
@@ -539,13 +462,6 @@ async def profile_ingest(req: ProfileIngestRequest) -> Dict[str, Any]:
     data = await call_llm([{"role": "system", "content": sys}, {"role": "user", "content": user}], temperature=0.0, max_tokens=900)
     return {"profile": parse_json_tolerant(data["choices"][0]["message"]["content"]), "model": LM_MODEL}
 
-
-@app.post("/profile/ingest_file")
-async def profile_ingest_file(file: UploadFile = File(...), name_hint: Optional[str] = None) -> Dict[str, Any]:
-    content = (await file.read()).decode("utf-8", errors="ignore")
-    return await profile_ingest(ProfileIngestRequest(raw_text=content, name_hint=name_hint))
-
-
 @app.post("/profile/save")
 def profile_save(req: ProfileSaveRequest) -> Dict[str, Any]:
     profile_id = uuid.uuid4().hex[:12]
@@ -559,7 +475,6 @@ def profile_save(req: ProfileSaveRequest) -> Dict[str, Any]:
     finally:
         conn.close()
     return {"profile_id": profile_id}
-
 
 @app.post("/rag/index")
 async def rag_index(req: RagIndexRequest) -> Dict[str, Any]:
@@ -592,7 +507,6 @@ async def rag_index(req: RagIndexRequest) -> Dict[str, Any]:
     finally:
         conn.close()
 
-
 @app.post("/rag/search")
 async def rag_search(req: RagSearchRequest) -> Dict[str, Any]:
     ensure_profile_has_chunks(req.profile_id)
@@ -614,7 +528,6 @@ async def rag_search(req: RagSearchRequest) -> Dict[str, Any]:
                     "results": [{"chunk_id": cid, "score": float(score), "text": text} for (score, cid, text) in top]}
     finally:
         conn.close()
-
 
 @app.post("/session/start")
 async def session_start(req: SessionStartRequest) -> Dict[str, Any]:
@@ -643,7 +556,6 @@ async def session_start(req: SessionStartRequest) -> Dict[str, Any]:
         conn.close()
 
     return {"session_id": session_id, "question": first_q, "model": LM_MODEL if LLM_PROVIDER == "lmstudio" else GEMINI_MODEL}
-
 
 @app.post("/session/turn")
 async def session_turn(req: SessionTurnRequest) -> Dict[str, Any]:
@@ -703,13 +615,6 @@ async def session_turn(req: SessionTurnRequest) -> Dict[str, Any]:
 
     return {"session_id": req.session_id, "question": next_q, "model": LM_MODEL if LLM_PROVIDER == "lmstudio" else GEMINI_MODEL, "score": score_obj, "rewrites": rewrites_obj}
 
-
-@app.post("/speech/transcribe")
-async def speech_transcribe(file: UploadFile = File(...)) -> Dict[str, Any]:
-    transcript, segs = await transcribe_upload(file)
-    return {"text": transcript, "segments": segs, "whisper_model": WHISPER_MODEL}
-
-
 @app.post("/speech/feedback")
 async def speech_feedback(req: SpeechFeedbackRequest) -> Dict[str, Any]:
     t = req.text.strip()
@@ -736,10 +641,8 @@ async def speech_feedback(req: SpeechFeedbackRequest) -> Dict[str, Any]:
 
     return {"input_text": t, "fillers_total": total, "filler_counts": counts, "coach": coach}
 
-
 @app.post("/drill/run")
-async def drill_run(file: UploadFile = File(...), mode: str = Form("general"), question: str = Form("")) -> Dict[str, Any]:
-    transcript, segs = await transcribe_upload(file)
+async def drill_run(transcript: str = Form(...), mode: str = Form("general"), question: str = Form("")) -> Dict[str, Any]:
     total, counts = filler_stats(transcript)
 
     rag_context = "Allowed facts:\n- Use only the transcript.\n"
@@ -758,15 +661,14 @@ async def drill_run(file: UploadFile = File(...), mode: str = Form("general"), q
                     transcript,
                     json.dumps(coach, ensure_ascii=False),
                     json.dumps({"fillers_total": total, "filler_counts": counts}, ensure_ascii=False),
-                    json.dumps(segs, ensure_ascii=False),
+                    "[]", # Segments removed since STT is local
                 ),
             )
     finally:
         conn.close()
 
     return {"drill_id": drill_id, "mode": mode, "question": question, "transcript": transcript,
-            "fillers_total": total, "filler_counts": counts, "coach": coach, "segments": segs}
-
+            "fillers_total": total, "filler_counts": counts, "coach": coach, "segments": []}
 
 @app.get("/drill/history")
 def drill_history(limit: int = 20) -> Dict[str, Any]:
@@ -795,14 +697,12 @@ def drill_history(limit: int = 20) -> Dict[str, Any]:
         })
     return {"count": len(items), "items": items}
 
-
 @app.post("/interview_voice/start")
 async def interview_voice_start(req: InterviewVoiceStartRequest) -> Dict[str, Any]:
     return await session_start(SessionStartRequest(role_title=req.role_title, job_description=req.job_description, profile_id=req.profile_id))
 
-
 @app.post("/interview_voice/turn")
-async def interview_voice_turn(session_id: str = Form(...), file: UploadFile = File(...)) -> Dict[str, Any]:
+async def interview_voice_turn(session_id: str = Form(...), transcript: str = Form(...)) -> Dict[str, Any]:
     conn = db_connect()
     try:
         with conn.cursor() as cur:
@@ -827,7 +727,6 @@ async def interview_voice_turn(session_id: str = Form(...), file: UploadFile = F
     if not last_question:
         last_question = "Interview question"
 
-    transcript, segs = await transcribe_upload(file)
     total, counts = filler_stats(transcript)
 
     rag_context = ""
@@ -856,7 +755,7 @@ async def interview_voice_turn(session_id: str = Form(...), file: UploadFile = F
                     json.dumps(turn_out.get("rewrites"), ensure_ascii=False),
                     json.dumps(speech_coach, ensure_ascii=False),
                     json.dumps({"fillers_total": total, "filler_counts": counts}, ensure_ascii=False),
-                    json.dumps(segs, ensure_ascii=False),
+                    "[]", # Removed segment data since Android handles STT
                 ),
             )
     finally:
@@ -873,9 +772,8 @@ async def interview_voice_turn(session_id: str = Form(...), file: UploadFile = F
         "next_question": turn_out.get("question"),
         "score": turn_out.get("score"),
         "rewrites": turn_out.get("rewrites"),
-        "segments": segs,
+        "segments": [],
     }
-
 
 @app.get("/interview_voice/history")
 def interview_voice_history(session_id: str, limit: int = 50) -> Dict[str, Any]:
